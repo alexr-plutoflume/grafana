@@ -4,15 +4,17 @@ import PromQlLanguageProvider from '../language_provider';
 import { css, cx } from '@emotion/css';
 import store from 'app/core/store';
 import { FixedSizeList } from 'react-window';
+import { debounce } from 'lodash';
 
 import { GrafanaTheme } from '@grafana/data';
 import { Label as PromLabel } from './Label';
 
 // Hard limit on labels to render
 const MAX_LABEL_COUNT = 10000;
-const MAX_VALUE_COUNT = 10000;
+const MAX_VALUE_COUNT = 50000;
 const EMPTY_SELECTOR = '{}';
 const METRIC_LABEL = '__name__';
+const FILTER_DEBOUNCE = 200;
 export const LAST_USED_LABELS_KEY = 'grafana.datasources.prometheus.browser.labels';
 
 export interface BrowserProps {
@@ -27,6 +29,9 @@ interface BrowserState {
   labels: SelectableLabel[];
   labelSearchTerm: string;
   metricSearchTerm: string;
+  metrics?: SelectableLabel;
+  nonMetricLabels: SelectableLabel[];
+  selectedLabels: SelectableLabel[];
   status: string;
   error: string;
   validationStatus: string;
@@ -179,7 +184,10 @@ export class UnthemedPrometheusMetricsBrowser extends React.Component<BrowserPro
   state = {
     labels: [] as SelectableLabel[],
     labelSearchTerm: '',
+    metrics: undefined,
     metricSearchTerm: '',
+    nonMetricLabels: [] as SelectableLabel[],
+    selectedLabels: [] as SelectableLabel[],
     status: 'Ready',
     error: '',
     validationStatus: '',
@@ -187,15 +195,15 @@ export class UnthemedPrometheusMetricsBrowser extends React.Component<BrowserPro
   };
 
   onChangeLabelSearch = (event: ChangeEvent<HTMLInputElement>) => {
-    this.setState({ labelSearchTerm: event.target.value });
+    this.setState({ labelSearchTerm: event.target.value }, this.updateLabelLists);
   };
 
   onChangeMetricSearch = (event: ChangeEvent<HTMLInputElement>) => {
-    this.setState({ metricSearchTerm: event.target.value });
+    this.setState({ metricSearchTerm: event.target.value }, this.updateLabelLists);
   };
 
   onChangeValueSearch = (event: ChangeEvent<HTMLInputElement>) => {
-    this.setState({ valueSearchTerm: event.target.value });
+    this.setState({ valueSearchTerm: event.target.value }, this.updateLabelLists);
   };
 
   onClickRunQuery = () => {
@@ -231,7 +239,7 @@ export class UnthemedPrometheusMetricsBrowser extends React.Component<BrowserPro
     });
     store.delete(LAST_USED_LABELS_KEY);
     // Get metrics
-    this.fetchValues(METRIC_LABEL);
+    this.fetchValues(METRIC_LABEL, EMPTY_SELECTOR);
   };
 
   onClickLabel = (name: string, value: string | undefined, event: React.MouseEvent<HTMLElement>) => {
@@ -301,134 +309,8 @@ export class UnthemedPrometheusMetricsBrowser extends React.Component<BrowserPro
     }, cb);
   }
 
-  componentDidMount() {
-    const { languageProvider } = this.props;
-    if (languageProvider) {
-      const selectedLabels: string[] = store.getObject(LAST_USED_LABELS_KEY, []);
-      languageProvider.start().then(() => {
-        let rawLabels: string[] = languageProvider.getLabelKeys();
-        // TODO too-many-metrics
-        if (rawLabels.length > MAX_LABEL_COUNT) {
-          const error = `Too many labels found (showing only ${MAX_LABEL_COUNT} of ${rawLabels.length})`;
-          rawLabels = rawLabels.slice(0, MAX_LABEL_COUNT);
-          this.setState({ error });
-        }
-        // Get metrics
-        this.fetchValues(METRIC_LABEL);
-        // Auto-select previously selected labels
-        const labels: SelectableLabel[] = rawLabels.map((label, i, arr) => ({
-          name: label,
-          selected: selectedLabels.includes(label),
-          loading: false,
-        }));
-        // Pre-fetch values for selected labels
-        this.setState({ labels }, () => {
-          this.state.labels.forEach((label) => {
-            if (label.selected) {
-              this.fetchValues(label.name);
-            }
-          });
-        });
-      });
-    }
-  }
-
-  doFacettingForLabel(name: string) {
-    const label = this.state.labels.find((l) => l.name === name);
-    if (!label) {
-      return;
-    }
-    const selectedLabels = this.state.labels.filter((label) => label.selected).map((label) => label.name);
-    store.setObject(LAST_USED_LABELS_KEY, selectedLabels);
-    if (label.selected) {
-      // Refetch values for newly selected label...
-      if (!label.values) {
-        this.fetchValues(name);
-      }
-    } else {
-      // Only need to facet when deselecting labels
-      this.doFacetting();
-    }
-  }
-
-  doFacetting = (lastFacetted?: string) => {
-    const selector = buildSelector(this.state.labels);
-    if (selector === EMPTY_SELECTOR) {
-      // Clear up facetting
-      const labels: SelectableLabel[] = this.state.labels.map((label) => {
-        return { ...label, facets: 0, values: undefined, hidden: false };
-      });
-      this.setState({ labels }, () => {
-        // Get fresh set of values
-        this.state.labels.forEach(
-          (label) => (label.selected || label.name === METRIC_LABEL) && this.fetchValues(label.name)
-        );
-      });
-    } else {
-      // Do facetting
-      this.fetchSeries(selector, lastFacetted);
-    }
-  };
-
-  async fetchValues(name: string) {
-    const { languageProvider } = this.props;
-    this.updateLabelState(name, { loading: true }, `Fetching values for ${name}`);
-    try {
-      let rawValues = await languageProvider.getLabelValues(name);
-      if (rawValues.length > MAX_VALUE_COUNT) {
-        const error = `Too many values for ${name} (showing only ${MAX_VALUE_COUNT} of ${rawValues.length})`;
-        rawValues = rawValues.slice(0, MAX_VALUE_COUNT);
-        this.setState({ error });
-      }
-      const values: FacettableValue[] = rawValues.map((value) => ({ name: value }));
-      this.updateLabelState(name, { values, loading: false }, '');
-    } catch (error) {
-      console.error(error);
-    }
-  }
-
-  async fetchSeries(selector: string, lastFacetted?: string) {
-    const { languageProvider } = this.props;
-    if (lastFacetted) {
-      this.updateLabelState(lastFacetted, { loading: true }, `Facetting labels for ${selector}`);
-    }
-    try {
-      const possibleLabels = await languageProvider.fetchSeriesLabels(selector, true);
-      if (Object.keys(possibleLabels).length === 0) {
-        // Sometimes the backend does not return a valid set
-        console.error('No results for label combination, but should not occur.');
-        this.setState({ error: `Facetting failed for ${selector}` });
-        return;
-      }
-      const labels: SelectableLabel[] = facetLabels(this.state.labels, possibleLabels, lastFacetted);
-      this.setState({ labels, error: '' });
-      if (lastFacetted) {
-        this.updateLabelState(lastFacetted, { loading: false });
-      }
-    } catch (error) {
-      console.error(error);
-    }
-  }
-
-  async validateSelector(selector: string) {
-    const { languageProvider } = this.props;
-    this.setState({ validationStatus: `Validating selector ${selector}`, error: '' });
-    const streams = await languageProvider.fetchSeries(selector);
-    this.setState({ validationStatus: `Selector is valid (${streams.length} streams found)` });
-  }
-
-  render() {
-    const { theme } = this.props;
-    const { labels, labelSearchTerm, metricSearchTerm, status, error, validationStatus, valueSearchTerm } = this.state;
-    const styles = getStyles(theme);
-    if (labels.length === 0) {
-      return (
-        <div className={styles.wrapper}>
-          <LoadingPlaceholder text="Loading labels..." />
-        </div>
-      );
-    }
-
+  updateLabelLists = debounce(() => {
+    const { labels, labelSearchTerm, metricSearchTerm, valueSearchTerm } = this.state;
     // Filter metrics
     let metrics = labels.find((label) => label.name === METRIC_LABEL);
     if (metrics && metricSearchTerm) {
@@ -455,8 +337,165 @@ export class UnthemedPrometheusMetricsBrowser extends React.Component<BrowserPro
         values: label.values?.filter((value) => value.selected || value.name.includes(valueSearchTerm)),
       }));
     }
+
+    this.setState({ metrics, selectedLabels, nonMetricLabels });
+  }, FILTER_DEBOUNCE);
+
+  componentDidMount() {
+    const { languageProvider } = this.props;
+    if (languageProvider) {
+      const selectedLabels: string[] = store.getObject(LAST_USED_LABELS_KEY, []);
+      languageProvider.start().then(() => {
+        let rawLabels: string[] = languageProvider.getLabelKeys();
+        // TODO too-many-metrics
+        if (rawLabels.length > MAX_LABEL_COUNT) {
+          const error = `Too many labels found (showing only ${MAX_LABEL_COUNT} of ${rawLabels.length})`;
+          rawLabels = rawLabels.slice(0, MAX_LABEL_COUNT);
+          this.setState({ error });
+        }
+        // Get metrics
+        this.fetchValues(METRIC_LABEL, EMPTY_SELECTOR);
+        // Auto-select previously selected labels
+        const labels: SelectableLabel[] = rawLabels.map((label, i, arr) => ({
+          name: label,
+          selected: selectedLabels.includes(label),
+          loading: false,
+        }));
+        // Pre-fetch values for selected labels
+        this.setState({ labels }, () => {
+          this.state.labels.forEach((label) => {
+            if (label.selected) {
+              this.fetchValues(label.name, EMPTY_SELECTOR);
+            }
+          });
+        });
+      });
+    }
+  }
+
+  doFacettingForLabel(name: string) {
+    const label = this.state.labels.find((l) => l.name === name);
+    if (!label) {
+      return;
+    }
+    const selectedLabels = this.state.labels.filter((label) => label.selected).map((label) => label.name);
+    store.setObject(LAST_USED_LABELS_KEY, selectedLabels);
+    if (label.selected) {
+      // Refetch values for newly selected label...
+      if (!label.values) {
+        this.fetchValues(name, buildSelector(this.state.labels));
+      }
+    } else {
+      // Only need to facet when deselecting labels
+      this.doFacetting();
+    }
+  }
+
+  doFacetting = (lastFacetted?: string) => {
+    const selector = buildSelector(this.state.labels);
+    if (selector === EMPTY_SELECTOR) {
+      // Clear up facetting
+      const labels: SelectableLabel[] = this.state.labels.map((label) => {
+        return { ...label, facets: 0, values: undefined, hidden: false };
+      });
+      this.setState({ labels }, () => {
+        // Get fresh set of values
+        this.state.labels.forEach(
+          (label) => (label.selected || label.name === METRIC_LABEL) && this.fetchValues(label.name, selector)
+        );
+        this.updateLabelLists();
+      });
+    } else {
+      // Do facetting
+      this.fetchSeries(selector, lastFacetted);
+    }
+  };
+
+  async fetchValues(name: string, selector: string) {
+    const { languageProvider } = this.props;
+    this.updateLabelState(name, { loading: true }, `Fetching values for ${name}`);
+    try {
+      let rawValues = await languageProvider.getLabelValues(name);
+      // If selector changed, clear loading state and discard result by returning early
+      if (selector !== buildSelector(this.state.labels)) {
+        this.updateLabelState(name, { loading: false }, '');
+        return;
+      }
+      if (rawValues.length > MAX_VALUE_COUNT) {
+        const error = `Too many values for ${name} (showing only ${MAX_VALUE_COUNT} of ${rawValues.length})`;
+        rawValues = rawValues.slice(0, MAX_VALUE_COUNT);
+        this.setState({ error });
+      }
+      const values: FacettableValue[] = rawValues.map((value) => ({ name: value }));
+      this.updateLabelState(name, { values, loading: false }, '', this.updateLabelLists);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  async fetchSeries(selector: string, lastFacetted?: string) {
+    const { languageProvider } = this.props;
+    if (lastFacetted) {
+      this.updateLabelState(lastFacetted, { loading: true }, `Facetting labels for ${selector}`);
+    }
+    try {
+      const possibleLabels = await languageProvider.fetchSeriesLabels(selector, true);
+      // If selector changed, clear loading state and discard result by returning early
+      if (selector !== buildSelector(this.state.labels)) {
+        if (lastFacetted) {
+          this.updateLabelState(lastFacetted, { loading: false });
+        }
+        return;
+      }
+      if (Object.keys(possibleLabels).length === 0) {
+        // Sometimes the backend does not return a valid set
+        console.error('No results for label combination, but should not occur.');
+        this.setState({ error: `Facetting failed for ${selector}` });
+        return;
+      }
+      const labels: SelectableLabel[] = facetLabels(this.state.labels, possibleLabels, lastFacetted);
+      this.setState({ labels, error: '' }, this.updateLabelLists);
+      if (lastFacetted) {
+        this.updateLabelState(lastFacetted, { loading: false });
+      }
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  async validateSelector(selector: string) {
+    const { languageProvider } = this.props;
+    this.setState({ validationStatus: `Validating selector ${selector}`, error: '' });
+    const streams = await languageProvider.fetchSeries(selector);
+    this.setState({ validationStatus: `Selector is valid (${streams.length} streams found)` });
+  }
+
+  render() {
+    const { theme } = this.props;
+    const {
+      labels,
+      labelSearchTerm,
+      metrics,
+      metricSearchTerm,
+      nonMetricLabels,
+      selectedLabels,
+      status,
+      error,
+      validationStatus,
+      valueSearchTerm,
+    } = this.state;
+    const styles = getStyles(theme);
+    if (labels.length === 0) {
+      return (
+        <div className={styles.wrapper}>
+          <LoadingPlaceholder text="Loading labels..." />
+        </div>
+      );
+    }
+
     const selector = buildSelector(this.state.labels);
     const empty = selector === EMPTY_SELECTOR;
+    const metricLabel = (metrics as unknown) as SelectableLabel;
     return (
       <div className={styles.wrapper}>
         <HorizontalGroup align="flex-start" spacing="lg">
@@ -473,21 +512,21 @@ export class UnthemedPrometheusMetricsBrowser extends React.Component<BrowserPro
               <div role="list" className={styles.valueListWrapper}>
                 <FixedSizeList
                   height={550}
-                  itemCount={metrics?.values?.length || 0}
+                  itemCount={metricLabel?.values?.length || 0}
                   itemSize={25}
-                  itemKey={(i) => (metrics!.values as FacettableValue[])[i].name}
+                  itemKey={(i) => (metricLabel!.values as FacettableValue[])[i].name}
                   width={300}
                   className={styles.valueList}
                 >
                   {({ index, style }) => {
-                    const value = metrics?.values?.[index];
+                    const value = metricLabel?.values?.[index];
                     if (!value) {
                       return null;
                     }
                     return (
                       <div style={style}>
                         <PromLabel
-                          name={metrics!.name}
+                          name={metricLabel!.name}
                           value={value?.name}
                           active={value?.selected}
                           onClick={this.onClickMetric}
