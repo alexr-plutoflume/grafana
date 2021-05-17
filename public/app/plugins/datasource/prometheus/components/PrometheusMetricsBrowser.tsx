@@ -236,7 +236,7 @@ export class UnthemedPrometheusMetricsBrowser extends React.Component<BrowserPro
         validationStatus: '',
         valueSearchTerm: '',
       };
-    });
+    }, this.updateLabelLists);
     store.delete(LAST_USED_LABELS_KEY);
     // Get metrics
     this.fetchValues(METRIC_LABEL, EMPTY_SELECTOR);
@@ -314,7 +314,6 @@ export class UnthemedPrometheusMetricsBrowser extends React.Component<BrowserPro
     // Filter metrics
     let metrics = labels.find((label) => label.name === METRIC_LABEL);
     if (metrics && metricSearchTerm) {
-      // TODO extract from render() and debounce
       metrics = {
         ...metrics,
         values: metrics.values?.filter((value) => value.selected || value.name.includes(metricSearchTerm)),
@@ -324,14 +323,12 @@ export class UnthemedPrometheusMetricsBrowser extends React.Component<BrowserPro
     // Filter labels
     let nonMetricLabels = labels.filter((label) => !label.hidden && label.name !== METRIC_LABEL);
     if (labelSearchTerm) {
-      // TODO extract from render() and debounce
       nonMetricLabels = nonMetricLabels.filter((label) => label.selected || label.name.includes(labelSearchTerm));
     }
 
     // Filter non-metric label values
     let selectedLabels = nonMetricLabels.filter((label) => label.selected && label.values);
     if (valueSearchTerm) {
-      // TODO extract from render() and debounce
       selectedLabels = selectedLabels.map((label) => ({
         ...label,
         values: label.values?.filter((value) => value.selected || value.name.includes(valueSearchTerm)),
@@ -467,7 +464,7 @@ export class UnthemedPrometheusMetricsBrowser extends React.Component<BrowserPro
     const { languageProvider } = this.props;
     this.setState({ validationStatus: `Validating selector ${selector}`, error: '' });
     const streams = await languageProvider.fetchSeries(selector);
-    this.setState({ validationStatus: `Selector is valid (${streams.length} streams found)` });
+    this.setState({ validationStatus: `Selector is valid (${streams.length} series found)` });
   }
 
   render() {
@@ -641,7 +638,7 @@ export class UnthemedPrometheusMetricsBrowser extends React.Component<BrowserPro
               Run query
             </Button>
             <Button
-              aria-label="Use selector as metrics button"
+              aria-label="Use selector for rate query button"
               variant="secondary"
               disabled={empty}
               onClick={this.onClickRunRateQuery}
